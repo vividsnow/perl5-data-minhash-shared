@@ -73,6 +73,8 @@ for my $c (@cases) {
     like $@, qr/too short/, 'short signature croaks';
     eval { Data::MinHash::Shared->bbit_similarity_of("", "", 0, 8) };
     like $@, qr/k must be/, 'k=0 in bbit_similarity_of croaks';
+    eval { Data::MinHash::Shared->bbit_similarity_of("x" x 8, "y" x 8, 2**58, 64) };
+    like $@, qr/2\^24|<= 16777216/, 'oversized k croaks instead of overflowing k*b (no OOB read)';
 }
 
 # ---- cross-process: signature exported by one handle compares via another ----

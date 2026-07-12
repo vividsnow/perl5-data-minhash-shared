@@ -252,6 +252,7 @@ bbit_similarity_of(class, sig_a, sig_b, k, b)
     PERL_UNUSED_VAR(class);
     if (b < 1 || b > 64) croak("Data::MinHash::Shared->bbit_similarity_of: b must be between 1 and 64");
     if (k < 1)           croak("Data::MinHash::Shared->bbit_similarity_of: k must be >= 1");
+    if (k > MNH_MAX_K)   croak("Data::MinHash::Shared->bbit_similarity_of: k must be <= 16777216 (2^24)");   /* bound k*b so `need` cannot overflow */
     a  = (const unsigned char *)SvPVbyte(sig_a, la);
     bp = (const unsigned char *)SvPVbyte(sig_b, lb);
     {
