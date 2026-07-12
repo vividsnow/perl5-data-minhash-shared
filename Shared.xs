@@ -173,6 +173,101 @@ similarity(self, other)
   OUTPUT:
     RETVAL
 
+# ---- b-bit MinHash: estimate Jaccard from only the low b bits of each register ----
+
+NV
+bbit_similarity(self, other, b)
+    SV *self
+    SV *other
+    UV b
+  PREINIT:
+    EXTRACT(self);
+  CODE:
+    if (b < 1 || b > 64)
+        croak("Data::MinHash::Shared->bbit_similarity: b must be between 1 and 64");
+    if (!sv_isobject(other) || !sv_derived_from(other, "Data::MinHash::Shared"))
+        croak("Data::MinHash::Shared->bbit_similarity: expected a Data::MinHash::Shared object");
+    MnhHandle *o = INT2PTR(MnhHandle*, SvIV(SvRV(other)));
+    if (!o) croak("Attempted to use a destroyed Data::MinHash::Shared object");
+    uint64_t ok = o->hdr->k;
+    if (ok != h->hdr->k)
+        croak("Data::MinHash::Shared->bbit_similarity: register-count mismatch (k=%llu vs k=%llu)",
+              (unsigned long long)h->hdr->k, (unsigned long long)ok);
+    {
+        uint64_t k = ok, o_max = mnh_reg_max(o);   /* Layer B: never read past o's mapping */
+        if (k > o_max) k = o_max;
+        uint64_t *tmp;
+        Newx(tmp, (size_t)(k ? k : 1), uint64_t);
+        SAVEFREEPV(tmp);
+        mnh_rwlock_rdlock(o);
+        memcpy(tmp, mnh_registers(o), (size_t)k * sizeof(uint64_t));
+        mnh_rwlock_rdunlock(o);
+
+        uint64_t mask = mnh_bbit_mask((uint32_t)b), agree, kk = h->hdr->k;
+        mnh_rwlock_rdlock(h);
+        agree = mnh_bbit_agree_locked(h, tmp, k, mask);
+        mnh_rwlock_rdunlock(h);
+        double f = kk ? (double)agree / (double)kk : 0.0;
+        RETVAL = mnh_bbit_correct(f, (uint32_t)b);
+    }
+  OUTPUT:
+    RETVAL
+
+SV *
+bbit_signature(self, b)
+    SV *self
+    UV b
+  PREINIT:
+    EXTRACT(self);
+  CODE:
+    if (b < 1 || b > 64)
+        croak("Data::MinHash::Shared->bbit_signature: b must be between 1 and 64");
+    {
+        uint64_t k = h->hdr->k, kmax = mnh_reg_max(h);   /* Layer B */
+        if (k > kmax) k = kmax;
+        uint64_t nbytes = (k * (uint64_t)b + 7) / 8;
+        uint64_t *regs; uint8_t *out;
+        Newx(regs, (size_t)(k ? k : 1), uint64_t);        SAVEFREEPV(regs);
+        Newx(out,  (size_t)(nbytes ? nbytes : 1), uint8_t); SAVEFREEPV(out);
+        mnh_rwlock_rdlock(h);
+        memcpy(regs, mnh_registers(h), (size_t)k * sizeof(uint64_t));
+        mnh_rwlock_rdunlock(h);
+        mnh_bbit_pack(regs, k, (uint32_t)b, out);          /* pack the low b bits, after unlock */
+        RETVAL = newSVpvn((char *)out, (STRLEN)nbytes);
+    }
+  OUTPUT:
+    RETVAL
+
+NV
+bbit_similarity_of(class, sig_a, sig_b, k, b)
+    SV *class
+    SV *sig_a
+    SV *sig_b
+    UV k
+    UV b
+  PREINIT:
+    STRLEN la, lb;
+    const unsigned char *a, *bp;
+  CODE:
+    PERL_UNUSED_VAR(class);
+    if (b < 1 || b > 64) croak("Data::MinHash::Shared->bbit_similarity_of: b must be between 1 and 64");
+    if (k < 1)           croak("Data::MinHash::Shared->bbit_similarity_of: k must be >= 1");
+    a  = (const unsigned char *)SvPVbyte(sig_a, la);
+    bp = (const unsigned char *)SvPVbyte(sig_b, lb);
+    {
+        STRLEN need = (STRLEN)(((uint64_t)k * (uint64_t)b + 7) / 8);
+        if (la < need || lb < need)
+            croak("Data::MinHash::Shared->bbit_similarity_of: signature too short for k=%llu b=%llu (need %llu bytes)",
+                  (unsigned long long)k, (unsigned long long)b, (unsigned long long)need);
+        uint64_t agree = 0;
+        for (uint64_t i = 0; i < (uint64_t)k; i++)
+            if (mnh_bbit_get(a, i, (uint32_t)b) == mnh_bbit_get(bp, i, (uint32_t)b)) agree++;
+        double f = (double)agree / (double)k;
+        RETVAL = mnh_bbit_correct(f, (uint32_t)b);
+    }
+  OUTPUT:
+    RETVAL
+
 void
 merge(self, other)
     SV *self

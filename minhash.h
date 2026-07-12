@@ -778,6 +778,51 @@ static uint64_t mnh_agree_locked(MnhHandle *h, const uint64_t *other, uint64_t o
     return agree;
 }
 
+/* ---- b-bit MinHash: compare / export only the low b bits of each register ---- */
+static inline uint64_t mnh_bbit_mask(uint32_t b) {
+    return (b >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << b) - 1);
+}
+/* correct the observed b-bit match fraction f to a Jaccard estimate: two registers
+ * whose true minimums differ still collide in b bits with probability 2^-b, so
+ * P(match) = J + (1-J)*2^-b  =>  J = (f - 2^-b)/(1 - 2^-b), clamped to [0,1]. */
+static inline double mnh_bbit_correct(double f, uint32_t b) {
+    double j;
+    if (b >= 64) j = f;                                   /* no random-collision term */
+    else { double p0 = 1.0 / (double)((uint64_t)1 << b);  /* 2^-b, exact for b < 64 */
+           j = (f - p0) / (1.0 - p0); }
+    return j < 0.0 ? 0.0 : (j > 1.0 ? 1.0 : j);
+}
+/* count registers whose low b bits agree between this sketch and the `other` snapshot */
+static uint64_t mnh_bbit_agree_locked(MnhHandle *h, const uint64_t *other, uint64_t other_k, uint64_t mask) {
+    uint64_t k = h->hdr->k;
+    uint64_t kmax = mnh_reg_max(h);        /* Layer B: clamp to the mapping */
+    if (k > kmax) k = kmax;
+    if (k > other_k) k = other_k;          /* ...and to the snapshot buffer */
+    uint64_t *reg = mnh_registers(h);
+    uint64_t agree = 0;
+    for (uint64_t j = 0; j < k; j++)
+        if ((reg[j] & mask) == (other[j] & mask)) agree++;
+    return agree;
+}
+/* pack the low b bits of n registers into out[] (ceil(n*b/8) bytes; register i at bit i*b) */
+static void mnh_bbit_pack(const uint64_t *reg, uint64_t n, uint32_t b, uint8_t *out) {
+    uint64_t nbytes = (n * (uint64_t)b + 7) / 8;
+    memset(out, 0, (size_t)nbytes);
+    uint64_t mask = mnh_bbit_mask(b);
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t v = reg[i] & mask, bitpos = i * (uint64_t)b;
+        for (uint32_t j = 0; j < b; j++)
+            if ((v >> j) & 1) out[(bitpos + j) >> 3] |= (uint8_t)(1u << ((bitpos + j) & 7));
+    }
+}
+/* extract register i's b-bit value from a packed signature buffer */
+static inline uint64_t mnh_bbit_get(const uint8_t *buf, uint64_t i, uint32_t b) {
+    uint64_t bitpos = i * (uint64_t)b, v = 0;
+    for (uint32_t j = 0; j < b; j++)
+        v |= (uint64_t)((buf[(bitpos + j) >> 3] >> ((bitpos + j) & 7)) & 1) << j;
+    return v;
+}
+
 /* number of registers that have taken a value (differ from the UINT64_MAX
  * empty sentinel); 0 means the sketch is empty. (caller holds a lock) */
 static uint64_t mnh_filled_locked(MnhHandle *h) {

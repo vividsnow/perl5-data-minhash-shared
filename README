@@ -1,6 +1,6 @@
 NAME
     Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity
-    estimation)
+    estimation, b-bit signatures)
 
 SYNOPSIS
         use Data::MinHash::Shared;
@@ -18,6 +18,11 @@ SYNOPSIS
 
         # share a sketch across processes via a backing file
         my $shared = Data::MinHash::Shared->new("/tmp/set.mh", 256);
+
+        # b-bit MinHash: estimate from only the low b bits, and export a compact signature
+        my $j   = $a->bbit_similarity($b, 1);      # corrected estimate from 1 bit per register
+        my $sig = $a->bbit_signature(1);           # 256 bits = 32 bytes (vs 2 KiB full sketch)
+        my $j2  = Data::MinHash::Shared->bbit_similarity_of($sig, $sig_b, 256, 1);
 
 DESCRIPTION
     A MinHash sketch in shared memory: it summarises a set as "k" "minimum
@@ -47,6 +52,24 @@ DESCRIPTION
     Two sketches must have the same number of registers to be compared or
     merged; "similarity" and "merge" croak on a register-count mismatch.
 
+  b-bit MinHash
+    b-bit MinHash (Li and Koenig) compares only the low "b" bits of each
+    register instead of the full 64. Two registers whose true minima differ
+    still collide in "b" bits with probability "2**-b", so the observed
+    match fraction "f" is corrected to a Jaccard estimate as "(f - 2**-b) /
+    (1 - 2**-b)". Small "b" (even "b == 1") gives a good estimate for all
+    but very high similarities, at a fraction of the storage: a "b"-bit
+    signature is "ceil(k * b / 8)" bytes -- e.g. "64x" smaller than the full
+    sketch at "b == 1" -- which makes it cheap to store or ship many
+    finalized sketches.
+
+    Because this sketch is incremental (each register keeps a running 64-bit
+    minimum, which the low bits alone cannot maintain), b-bit is offered as
+    a finalization: the live sketch stays full, and you either compare two
+    live sketches with "bbit_similarity", or "bbit_signature" a snapshot for
+    compact storage and later compare snapshots with "bbit_similarity_of".
+    "b" ranges from 1 to 64 ("b == 64" is exactly the full "similarity").
+
 METHODS
   Constructors
         my $mh = Data::MinHash::Shared->new($path, $k, $mode);
@@ -69,6 +92,11 @@ METHODS
         my $j       = $mh->jaccard($other);      # alias for similarity
         $mh->merge($other);                      # this sketch becomes the union's sketch
         $mh->clear;                              # reset to the empty sketch
+
+        # b-bit MinHash (see above)
+        my $j   = $mh->bbit_similarity($other, $b);   # Jaccard from the low $b bits (b: 1..64)
+        my $sig = $mh->bbit_signature($b);            # compact packed signature, ceil(k*b/8) bytes
+        my $j2  = Data::MinHash::Shared->bbit_similarity_of($sig_a, $sig_b, $k, $b);  # compare snapshots
 
     "add" folds one element in and returns 1 if it lowered at least one
     register (so it changed the sketch), else 0. "add_many" folds an array

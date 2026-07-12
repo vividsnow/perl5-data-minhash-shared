@@ -1,7 +1,7 @@
 package Data::MinHash::Shared;
 use strict;
 use warnings;
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 require XSLoader;
 XSLoader::load('Data::MinHash::Shared', $VERSION);
 
@@ -16,7 +16,7 @@ __END__
 
 =head1 NAME
 
-Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity estimation)
+Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity estimation, b-bit signatures)
 
 =head1 SYNOPSIS
 
@@ -35,6 +35,11 @@ Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity estimat
 
     # share a sketch across processes via a backing file
     my $shared = Data::MinHash::Shared->new("/tmp/set.mh", 256);
+
+    # b-bit MinHash: estimate from only the low b bits, and export a compact signature
+    my $j   = $a->bbit_similarity($b, 1);      # corrected estimate from 1 bit per register
+    my $sig = $a->bbit_signature(1);           # 256 bits = 32 bytes (vs 2 KiB full sketch)
+    my $j2  = Data::MinHash::Shared->bbit_similarity_of($sig, $sig_b, 256, 1);
 
 =head1 DESCRIPTION
 
@@ -63,6 +68,24 @@ first. B<Linux-only>. Requires 64-bit Perl.
 Two sketches must have B<the same number of registers> to be compared or merged;
 C<similarity> and C<merge> croak on a register-count mismatch.
 
+=head2 b-bit MinHash
+
+B<b-bit MinHash> (Li and Koenig) compares only the B<low C<b> bits> of each
+register instead of the full 64. Two registers whose true minima differ still
+collide in C<b> bits with probability C<2**-b>, so the observed match fraction
+C<f> is corrected to a Jaccard estimate as C<< (f - 2**-b) / (1 - 2**-b) >>.
+Small C<b> (even C<b == 1>) gives a good estimate for all but very high
+similarities, at a fraction of the storage: a C<b>-bit B<signature> is
+C<ceil(k * b / 8)> bytes -- e.g. C<64x> smaller than the full sketch at C<b == 1>
+-- which makes it cheap to store or ship many finalized sketches.
+
+Because this sketch is B<incremental> (each register keeps a running 64-bit
+minimum, which the low bits alone cannot maintain), b-bit is offered as a
+B<finalization>: the live sketch stays full, and you either compare two live
+sketches with C<bbit_similarity>, or C<bbit_signature> a snapshot for compact
+storage and later compare snapshots with C<bbit_similarity_of>. C<b> ranges from
+1 to 64 (C<b == 64> is exactly the full C<similarity>).
+
 =head1 METHODS
 
 =head2 Constructors
@@ -88,6 +111,11 @@ to C<new> (e.g. C<0660>) for cross-user sharing; it defaults to C<0600>
     my $j       = $mh->jaccard($other);      # alias for similarity
     $mh->merge($other);                      # this sketch becomes the union's sketch
     $mh->clear;                              # reset to the empty sketch
+
+    # b-bit MinHash (see above)
+    my $j   = $mh->bbit_similarity($other, $b);   # Jaccard from the low $b bits (b: 1..64)
+    my $sig = $mh->bbit_signature($b);            # compact packed signature, ceil(k*b/8) bytes
+    my $j2  = Data::MinHash::Shared->bbit_similarity_of($sig_a, $sig_b, $k, $b);  # compare snapshots
 
 C<add> folds one element in and returns B<1 if it lowered at least one register>
 (so it changed the sketch), else B<0>. C<add_many> folds an array reference under
