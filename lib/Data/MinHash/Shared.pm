@@ -37,9 +37,10 @@ Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity estimat
     my $shared = Data::MinHash::Shared->new("/tmp/set.mh", 256);
 
     # b-bit MinHash: estimate from only the low b bits, and export a compact signature
-    my $j   = $a->bbit_similarity($b, 1);      # corrected estimate from 1 bit per register
-    my $sig = $a->bbit_signature(1);           # 256 bits = 32 bytes (vs 2 KiB full sketch)
-    my $j2  = Data::MinHash::Shared->bbit_similarity_of($sig, $sig_b, 256, 1);
+    my $j     = $a->bbit_similarity($b, 1);    # corrected estimate from 1 bit per register
+    my $sig_a = $a->bbit_signature(1);         # 256 bits = 32 bytes (vs 2 KiB full sketch)
+    my $sig_b = $b->bbit_signature(1);
+    my $j2    = Data::MinHash::Shared->bbit_similarity_of($sig_a, $sig_b, 256, 1);
 
 =head1 DESCRIPTION
 
@@ -173,6 +174,18 @@ Mutation is guarded by a futex-based write-preferring rwlock with PID-encoded
 ownership and dead-owner recovery. Each C<add> is a short bounded update, so a
 crash leaves the sketch consistent up to the last completed operation.
 B<Limitation>: PID reuse is not detected (very unlikely in practice).
+
+Reader-slot exhaustion (slotless readers): dead-process recovery attributes a
+crashed lock holder's contribution through its reader-slot. The slot table holds
+1024 entries (one per concurrent reader process). If more than that many reader
+processes share one mapping at once, a reader that cannot claim a slot proceeds
+"slotless" -- it still takes the read lock but leaves no per-process record. If
+such a slotless reader is then killed while holding the read lock, its share of
+the lock cannot be attributed to a dead process, so writer recovery cannot
+reclaim it and writers may block until the mapping is recreated. Reaching this
+needs more than 1024 concurrent reader processes on one mapping plus a crash in
+the brief read-lock window; the dead-process slot reclaim keeps the table from
+filling with stale entries, so in practice it is very unlikely.
 
 =head1 SEE ALSO
 

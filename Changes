@@ -1,9 +1,9 @@
 Revision history for Data-MinHash-Shared
 
-0.02      2026-07-12
-          - Add b-bit MinHash: bbit_similarity (Jaccard from the low b bits with
-            the 2^-b collision correction), bbit_signature (compact packed
-            snapshot), and the static bbit_similarity_of to compare snapshots.
+0.02      2026-07-21
+          - Add b-bit MinHash (bbit_similarity / bbit_signature / bbit_similarity_of).
+          - Copy the first signature before reading the second in bbit.
+          - Resolve argument magic before capturing the path string.
 
 0.01      2026-07-10
           - Initial release.

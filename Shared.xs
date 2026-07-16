@@ -9,7 +9,18 @@
     if (!sv_isobject(sv) || !sv_derived_from(sv, "Data::MinHash::Shared")) \
         croak("Expected a Data::MinHash::Shared object"); \
     MnhHandle *h = INT2PTR(MnhHandle*, SvIV(SvRV(sv))); \
-    if (!h) croak("Attempted to use a destroyed Data::MinHash::Shared object")
+    if (!h) croak("Attempted to use a destroyed Data::MinHash::Shared object"); \
+    sv_2mortal(SvREFCNT_inc(SvRV(sv)))
+
+/* Re-read the handle after a call that can run Perl code (tied/overloaded
+ * argument magic, tied-array fetches).  That code may call $obj->DESTROY
+ * explicitly, which frees the handle and zeroes the IV; EXTRACT's mortal
+ * pins the referent only against refcount-driven destruction, not an
+ * explicit DESTROY, so the local `h` would dangle.  Used only where magic
+ * can actually intervene between EXTRACT and the first use of h. */
+#define REEXTRACT(sv) \
+    h = INT2PTR(MnhHandle*, SvIV(SvRV(sv))); \
+    if (!h) croak("Data::MinHash::Shared object destroyed during the call")
 
 #define MAKE_OBJ(class, handle) \
     SV *obj = newSViv(PTR2IV(handle)); \
@@ -29,13 +40,15 @@ new(class, path = &PL_sv_undef, k = 0, ...)
   PREINIT:
     char errbuf[MNH_ERR_BUFLEN];
   CODE:
-    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     if (k < 1)
         croak("Data::MinHash::Shared->new: number of registers must be >= 1");
     /* Optional 4th arg: file mode for a newly-created file-backed segment
      * (default 0600, owner-only). Pass e.g. 0660 to opt into cross-user
      * sharing. Ignored for anonymous segments and existing files. */
     mode_t mode = (items > 3 && (SvGETMAGIC(ST(3)), SvOK(ST(3)))) ? (mode_t)SvUV(ST(3)) : 0600;
+    /* Capture the path PV LAST, after the get-magic on mode above has run:
+     * that magic can realloc/free path's PV and dangle p before use. */
+    const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     MnhHandle *h = mnh_create(p, (uint64_t)k, mode, errbuf);
     if (!h) croak("Data::MinHash::Shared->new: %s", errbuf);
     MAKE_OBJ(class, h);
@@ -91,6 +104,7 @@ add(self, item)
     const char *s;
   CODE:
     s = SvPVbyte(item, n);                 /* may croak (wide char) -- BEFORE the lock */
+    REEXTRACT(self);
     mnh_rwlock_wrlock(h);
     RETVAL = mnh_add_locked(h, s, n);
     __atomic_fetch_add(&h->hdr->stat_ops, 1, __ATOMIC_RELAXED);
@@ -108,6 +122,7 @@ add_many(self, items)
     IV  top;
     UV  changed = 0;
   CODE:
+    SvGETMAGIC(items);
     if (!SvROK(items) || SvTYPE(SvRV(items)) != SVt_PVAV)
         croak("Data::MinHash::Shared->add_many: expected an array reference");
     av = (AV *)SvRV(items);
@@ -120,10 +135,18 @@ add_many(self, items)
             Newx(ls, cnt, STRLEN);       SAVEFREEPV(ls);
             for (i = 0; i < cnt; i++) {                  /* a croak here holds NO lock; SAVEFREEPV cleans up */
                 SV **el = av_fetch(av, (SSize_t)i, 0);
-                if (el && *el) ps[i] = SvPVbyte(*el, ls[i]);
-                else { ps[i] = ""; ls[i] = 0; }
+                if (el && *el) {
+                    STRLEN len;
+                    const char *src = SvPVbyte(*el, len); /* may run overload/tie/get-magic = arbitrary Perl */
+                    /* Copy bytes into a private mortal SV NOW: a LATER element SvPVbyte can
+                     * grow/free THIS element PV, dangling src before the locked loop uses it. */
+                    SV *copy = sv_2mortal(newSVpvn(src, len));
+                    ps[i] = SvPVX_const(copy);
+                    ls[i] = len;
+                } else { ps[i] = ""; ls[i] = 0; }
             }
         }
+        REEXTRACT(self);
         mnh_rwlock_wrlock(h);                             /* locked region: NO croak-capable calls */
         for (i = 0; i < cnt; i++) changed += (UV)mnh_add_locked(h, ps[i], ls[i]);
         __atomic_fetch_add(&h->hdr->stat_ops, 1, __ATOMIC_RELAXED);  /* a call always counts, even an empty batch */
@@ -144,6 +167,7 @@ similarity(self, other)
         croak("Data::MinHash::Shared->similarity: expected a Data::MinHash::Shared object");
     MnhHandle *o = INT2PTR(MnhHandle*, SvIV(SvRV(other)));
     if (!o) croak("Attempted to use a destroyed Data::MinHash::Shared object");
+    REEXTRACT(self);
 
     /* k is immutable after creation -- compare lock-free, croak BEFORE allocating
      * so a mismatch holds no lock and leaks no buffer. */
@@ -189,6 +213,7 @@ bbit_similarity(self, other, b)
         croak("Data::MinHash::Shared->bbit_similarity: expected a Data::MinHash::Shared object");
     MnhHandle *o = INT2PTR(MnhHandle*, SvIV(SvRV(other)));
     if (!o) croak("Attempted to use a destroyed Data::MinHash::Shared object");
+    REEXTRACT(self);
     uint64_t ok = o->hdr->k;
     if (ok != h->hdr->k)
         croak("Data::MinHash::Shared->bbit_similarity: register-count mismatch (k=%llu vs k=%llu)",
@@ -253,7 +278,10 @@ bbit_similarity_of(class, sig_a, sig_b, k, b)
     if (b < 1 || b > 64) croak("Data::MinHash::Shared->bbit_similarity_of: b must be between 1 and 64");
     if (k < 1)           croak("Data::MinHash::Shared->bbit_similarity_of: k must be >= 1");
     if (k > MNH_MAX_K)   croak("Data::MinHash::Shared->bbit_similarity_of: k must be <= 16777216 (2^24)");   /* bound k*b so `need` cannot overflow */
-    a  = (const unsigned char *)SvPVbyte(sig_a, la);
+    /* Copy sig_a into a private mortal first: SvPVbyte(sig_b) below runs a
+     * tied/overloaded sig_b's magic, which could realloc/free sig_a's PV and
+     * dangle `a`. The copy stays valid for the compare loop. */
+    { SV *ca = sv_2mortal(newSVsv(sig_a)); a = (const unsigned char *)SvPVbyte(ca, la); }
     bp = (const unsigned char *)SvPVbyte(sig_b, lb);
     {
         STRLEN need = (STRLEN)(((uint64_t)k * (uint64_t)b + 7) / 8);
@@ -280,6 +308,7 @@ merge(self, other)
         croak("Data::MinHash::Shared->merge: expected a Data::MinHash::Shared object");
     MnhHandle *o = INT2PTR(MnhHandle*, SvIV(SvRV(other)));
     if (!o) croak("Attempted to use a destroyed Data::MinHash::Shared object");
+    REEXTRACT(self);
 
     /* k is immutable after creation -- compare lock-free, croak BEFORE allocating
      * so a mismatch holds no lock and leaks no buffer. */
