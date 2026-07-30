@@ -36,6 +36,11 @@ Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity estimat
     # share a sketch across processes via a backing file
     my $shared = Data::MinHash::Shared->new("/tmp/set.mh", 256);
 
+    # freeze and ship: query it read-only (lock-free) on other machines
+    $shared->freeze;
+    my $ro = Data::MinHash::Shared->new_readonly("/tmp/set.mh");
+    $ro->similarity($a);
+
     # b-bit MinHash: estimate from only the low b bits, and export a compact signature
     my $j     = $a->bbit_similarity($b, 1);    # corrected estimate from 1 bit per register
     my $sig_a = $a->bbit_signature(1);         # 256 bits = 32 bytes (vs 2 KiB full sketch)
@@ -95,6 +100,7 @@ storage and later compare snapshots with C<bbit_similarity_of>. C<b> ranges from
     my $mh = Data::MinHash::Shared->new(undef, $k);              # anonymous
     my $mh = Data::MinHash::Shared->new_memfd($name, $k);
     my $mh = Data::MinHash::Shared->new_from_fd($fd);
+    my $ro = Data::MinHash::Shared->new_readonly($path);         # frozen file, read-only
 
 C<$k> is the number of registers (at least 1, up to 2^24) and sets the
 accuracy/memory trade-off; memory is C<k * 8> bytes for the registers plus a
@@ -102,7 +108,8 @@ fixed header. C<new> and C<new_memfd> croak on a C<$k> below 1 or above 2^24.
 When reopening an existing file or memfd the stored C<$k> wins and the caller's
 argument is ignored. An optional file B<mode> may be passed as the last argument
 to C<new> (e.g. C<0660>) for cross-user sharing; it defaults to C<0600>
-(owner-only).
+(owner-only). C<new_readonly> opens a B<frozen> file read-only for lock-free
+querying (see L</"FROZEN (READ-ONLY) MODE">).
 
 =head2 Building and comparing
 
@@ -133,14 +140,15 @@ otherwise.
     $mh->capacity;      # alias for size
     $mh->filled;        # registers that hold a value: 0 if empty, else k
     my @regs = $mh->registers;   # snapshot of the k register values
-    $mh->stats;         # { size, filled, ops, mmap_size }
+    $mh->stats;         # { size, filled, ops, mmap_size, frozen, readonly }
 
 C<filled> counts registers that hold a value (differ from the empty sentinel).
 Every C<add> updates all C<k> registers at once, so C<filled> is 0 for a fresh or
 cleared sketch and C<k> once any element has been added -- it is really an
 emptiness check rather than a fill gauge. C<registers> returns a snapshot of the
 raw register values (unsigned integers) taken under the read lock -- useful for
-serialising or comparing sketches yourself.
+serialising or comparing sketches yourself. C<stats> also reports C<frozen> and
+C<readonly> (see L</"FROZEN (READ-ONLY) MODE">).
 
 =head2 Lifecycle
 
@@ -159,6 +167,45 @@ or a B<memfd> passed to an unrelated process and reopened with
 C<< new_from_fd($fd) >>. Every process's C<add> folds into the one shared sketch,
 so a fleet of workers can each stream part of a set and the merged sketch
 reflects them all.
+
+=head1 FROZEN (READ-ONLY) MODE
+
+A file-backed sketch can be B<frozen> and then shipped to other machines, where
+consumers open it B<read-only> and query it with B<no locking at all>.
+
+    # producer: build, freeze, ship the file
+    my $mh = Data::MinHash::Shared->new("/tmp/set.mh", 256);
+    $mh->add_many(\@known);
+    $mh->freeze;                 # seal: now immutable, and $mh itself is read-only
+    # ... copy /tmp/set.mh to another host ...
+
+    # consumer (any process, same architecture): read-only, lock-free
+    my $ro = Data::MinHash::Shared->new_readonly("/tmp/set.mh");
+    $ro->similarity($other);
+
+C<freeze> takes the write lock, marks the sketch B<permanently immutable> (there
+is no unfreeze -- rebuild the file to change it), and flushes the seal to disk.
+A frozen sketch rejects every mutator (C<add>, C<add_many>, C<merge>, C<clear>)
+with a croak, and a read-write reopen (C<< new($path, ...) >>) of a sealed file
+is B<refused> -- so a shipped artifact can never be silently mutated out from
+under its readers.
+
+C<new_readonly($path)> maps the file C<O_RDONLY> / C<PROT_READ> and B<requires it
+to be frozen> (it croaks on a file that was never C<freeze>d). Because a sealed
+sketch's registers and geometry are immutable, C<similarity>, C<bbit_similarity>,
+C<bbit_signature>, C<registers>, C<filled> and C<stats> read them B<directly,
+taking no reader lock> -- the mapping is never written, so a read-only view works
+from a read-only file descriptor or a read-only filesystem, and any number of
+processes can share one C<PROT_READ> mapping. C<similarity> and
+C<bbit_similarity> also accept a B<frozen> C<$other>: its registers are read
+lock-free the same way. C<frozen> and C<readonly> report the two states.
+
+B<Portability.> The on-disk format is native binary (native-endian 64-bit
+words), so a frozen file may be copied only between machines of the B<same
+architecture>; a wrong-endian file is rejected at open by the magic check.
+B<Copy the file to each consumer> -- do not share one file over a network
+filesystem: the lock is a Linux futex (process-local to one kernel), and the
+"no live writer" contract assumes a static copy. Linux-only; 64-bit Perl.
 
 =head1 SECURITY
 
