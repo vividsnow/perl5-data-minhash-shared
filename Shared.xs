@@ -57,7 +57,7 @@ new(class, path = &PL_sv_undef, k = 0, ...)
      * that magic can realloc/free path's PV and dangle p before use. */
     const char *p = (SvGETMAGIC(path), SvOK(path)) ? SvPV_nolen(path) : NULL;
     MnhHandle *h = mnh_create(p, (uint64_t)k, mode, errbuf);
-    if (!h) croak("Data::MinHash::Shared->new: %s", errbuf);
+    if (!h) croak("Data::MinHash::Shared->new: %s", errbuf[0] ? errbuf : "out of memory");
     /* Re-read the class PV at the point of use: xsubpp captured it in INPUT,
      * before the k/mode/path magic above, which can realloc/free that PV and
      * dangle `class` before MAKE_OBJ passes it to gv_stashpv. */
@@ -78,7 +78,7 @@ new_memfd(class, name = &PL_sv_undef, k = 0)
     if (k < 1)
         croak("Data::MinHash::Shared->new_memfd: number of registers must be >= 1");
     MnhHandle *h = mnh_create_memfd(nm, (uint64_t)k, errbuf);
-    if (!h) croak("Data::MinHash::Shared->new_memfd: %s", errbuf);
+    if (!h) croak("Data::MinHash::Shared->new_memfd: %s", errbuf[0] ? errbuf : "out of memory");
     /* Re-read the class PV at the point of use (see new above): the k/name
      * magic ran after xsubpp captured `class` in INPUT. */
     class = SvPV_nolen(ST(0));
@@ -94,7 +94,7 @@ new_from_fd(class, fd)
     char errbuf[MNH_ERR_BUFLEN];
   CODE:
     MnhHandle *h = mnh_open_fd(fd, errbuf);
-    if (!h) croak("Data::MinHash::Shared->new_from_fd: %s", errbuf);
+    if (!h) croak("Data::MinHash::Shared->new_from_fd: %s", errbuf[0] ? errbuf : "out of memory");
     /* Re-read the class PV at the point of use (see new above): the fd
      * conversion in INPUT ran its magic after `class` was captured. */
     class = SvPV_nolen(ST(0));

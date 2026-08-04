@@ -59,5 +59,14 @@ unlink $p;
     is_deeply([ $r->registers ], \@regs, "reopening a valid file preserves its data");
     undef $r; unlink $p;
 }
+# 5. A magic==0 file of the right size but with NON-zero data (not a fresh
+#    ftruncate) is NOT recovered -- recovery only re-inits a provably-empty file.
+{
+    open my $zfh, '>', $p or die $!; truncate $zfh, $total or die $!; close $zfh;
+    open $zfh, '+<', $p or die $!; seek $zfh, $total - 1, 0; print $zfh "\x01"; close $zfh;
+    my $m = eval { Data::MinHash::Shared->new($p, 128) };
+    ok(!$m, "new() refuses a magic==0 file that is not all-zero (no clobber of real data)");
+    undef $m; unlink $p;
+}
 
 done_testing;
