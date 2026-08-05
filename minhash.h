@@ -529,9 +529,10 @@ static inline void mnh_init_header(void *base, uint64_t k, uint64_t total) {
     hdr->registers_off    = L.registers;
     memset((char *)base + L.registers, 0xFF, (size_t)(k * sizeof(uint64_t)));  /* registers = UINT64_MAX */
     /* Publish magic LAST, as a release store: it is the commit point, so a
-       creator killed before this store leaves magic==0 -- which the
-       crashed-creator recovery treats as an abandoned mid-init file and
-       recovers, instead of a magic-set-but-incomplete header that would brick. */
+       creator killed before it leaves magic==0 and the file is never mistaken
+       for a valid one.  Recovery re-initializes such a file only while it is
+       still all-zero (a kill during the ftruncate or the zeroing above); a kill
+       during the few field stores leaves a file to remove by hand. */
     __atomic_store_n(&hdr->magic, MNH_MAGIC, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
@@ -676,6 +677,11 @@ static MnhHandle *mnh_create(const char *path, uint64_t k, mode_t mode, char *er
                     mnh_init_header(base, k, total);
                     flock(fd, LOCK_UN); close(fd);
                     return mnh_setup(base, map_size, path, -1);
+                }
+                if (((MnhHeader *)base)->magic == 0 && (uint64_t)st.st_size == total
+                    && st.st_uid == geteuid()) {
+                    MNH_ERR("%s: incomplete MinHash sketch file left by an interrupted create; remove it and retry", path);
+                    munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
                 }
                 MNH_ERR("invalid MinHash sketch file"); munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
             }
