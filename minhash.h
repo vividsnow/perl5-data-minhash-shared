@@ -673,7 +673,6 @@ static MnhHandle *mnh_create(const char *path, uint64_t k, mode_t mode, char *er
                         MNH_ERR("%s: fchmod: %s", path, strerror(errno));
                         munmap(base, map_size); flock(fd, LOCK_UN); close(fd); return NULL;
                     }
-                    memset(base, 0, map_size);   /* start from a provably empty sketch */
                     mnh_init_header(base, k, total);
                     flock(fd, LOCK_UN); close(fd);
                     return mnh_setup(base, map_size, path, -1);
