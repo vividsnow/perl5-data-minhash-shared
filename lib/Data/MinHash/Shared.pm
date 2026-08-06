@@ -1,7 +1,7 @@
 package Data::MinHash::Shared;
 use strict;
 use warnings;
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 require XSLoader;
 XSLoader::load('Data::MinHash::Shared', $VERSION);
 
@@ -16,7 +16,8 @@ __END__
 
 =head1 NAME
 
-Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity estimation, b-bit signatures)
+Data::MinHash::Shared - shared-memory MinHash sketch (Jaccard similarity
+estimation, b-bit signatures)
 
 =head1 SYNOPSIS
 
@@ -106,7 +107,8 @@ C<$k> is the number of registers (at least 1, up to 2^24) and sets the
 accuracy/memory trade-off; memory is C<k * 8> bytes for the registers plus a
 fixed header. C<new> and C<new_memfd> croak on a C<$k> below 1 or above 2^24.
 When reopening an existing file or memfd the stored C<$k> wins and the caller's
-argument is ignored. An optional file B<mode> may be passed as the last argument
+argument does not change it -- but it is still range-checked, so an
+out-of-range value croaks. An optional file B<mode> may be passed as the last argument
 to C<new> (e.g. C<0660>) for cross-user sharing; it defaults to C<0600>
 (owner-only). C<new_readonly> opens a B<frozen> file read-only for lock-free
 querying (see L</"FROZEN (READ-ONLY) MODE">).
@@ -161,10 +163,12 @@ anonymous, memfd, or fd-reopened sketches) and C<memfd> the backing descriptor.
 
 =head1 SHARING ACROSS PROCESSES
 
-The sketch lives in a shared mapping, shared the same three ways as the rest of
-the family: a B<backing file>, an B<anonymous mapping inherited across C<fork>>,
-or a B<memfd> passed to an unrelated process and reopened with
-C<< new_from_fd($fd) >>. Every process's C<add> folds into the one shared sketch,
+The sketch lives in a shared mapping, shared the same three ways as the rest
+of the family: a B<backing file>, an B<anonymous mapping inherited across
+C<fork>>, or a B<memfd> passed to an unrelated process and reopened with C<<
+new_from_fd($fd) >>. The descriptor you pass is duplicated
+(C<F_DUPFD_CLOEXEC>), so it stays yours to close and closing it does not
+disturb the handle. Every process's C<add> folds into the one shared sketch,
 so a fleet of workers can each stream part of a set and the merged sketch
 reflects them all.
 
@@ -233,6 +237,16 @@ reclaim it and writers may block until the mapping is recreated. Reaching this
 needs more than 1024 concurrent reader processes on one mapping plus a crash in
 the brief read-lock window; the dead-process slot reclaim keeps the table from
 filling with stale entries, so in practice it is very unlikely.
+
+An interrupted create is recovered too. A creator killed after the backing
+file is sized but before its header is committed leaves a full-size, all-zero
+file. C<new> re-initializes such a file automatically, but only when it is
+exactly the size the requested geometry needs, is owned by your effective uid,
+and is still entirely zero -- a file holding data is never re-initialized. If
+the creator got as far as writing part of the header, the file cannot be told
+apart from a corrupt one and C<new> croaks with C<incomplete MinHash sketch
+file left by an interrupted create; remove it and retry>. Such a file never
+held any data, so removing it is safe.
 
 =head1 SEE ALSO
 
