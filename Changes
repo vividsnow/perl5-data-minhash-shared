@@ -1,5 +1,15 @@
 Revision history for Data-MinHash-Shared
 
+0.05      2026-09-26
+          - Creating a segment reserves its space, so a full filesystem makes
+            the constructor croak instead of dying with SIGBUS;
+            DATA_MINHASH_SHARED_SPARSE=1 skips the reservation.
+          - A create that fails at mmap no longer leaves a full-size file
+            behind.
+          - Checking a file left by an interrupted create no longer allocates
+            its pages on tmpfs.
+          - Error messages no longer lose their reason to a long path.
+
 0.04      2026-09-15
           - Recover a lock left ownerless by a corrupt file instead of hanging.
           - Fix a writer stall on ARM64 after readers release.
